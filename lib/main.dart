@@ -1,165 +1,351 @@
-// ignore_for_file: constant_identifier_names
-
 import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
-import 'package:path_provider/path_provider.dart';
-import 'package:rtmp_broadcaster/camera.dart';
-import 'package:video_player/video_player.dart';
-import 'package:wakelock/wakelock.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:wakelock/wakelock.dart';
+import 'package:rtmp_broadcaster/camera.dart';
 
-class CameraExampleHome extends StatefulWidget {
-  const CameraExampleHome({super.key});
+// Lista de cámaras disponible global
+List<CameraDescription> cameras = [];
+
+// Colores sobrios
+class AppColors {
+  static const background = Color(0xFF2C2C2C);
+  static const foreground = Color(0xFFF0EDE5);
+  static const accent = Color(0xFFBFA98F);
+  static const liveRed = Color(0xFFD32F2F);
+  static const buttonColor = Color(0xFF444444);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//                         PANTALLA INICIAL (STREAM KEY)
+// ─────────────────────────────────────────────────────────────────────────────
+class StartStreamPage extends StatefulWidget {
+  const StartStreamPage({Key? key}) : super(key: key);
 
   @override
-  CameraExampleHomeState createState() {
-    return CameraExampleHomeState();
-  }
+  State<StartStreamPage> createState() => _StartStreamPageState();
 }
 
-/// Returns a suitable camera icon for [direction].
-IconData getCameraLensIcon(CameraLensDirection? direction) {
-  switch (direction) {
-    case CameraLensDirection.back:
-      return Icons.camera_rear;
-    case CameraLensDirection.front:
-      return Icons.camera_front;
-    case CameraLensDirection.external:
-    default:
-      return Icons.camera;
-  }
-}
-
-void logError(String code, String message) =>
-    debugPrint('Error: $code\nError Message: $message');
-
-class CameraExampleHomeState extends State<CameraExampleHome>
-    with WidgetsBindingObserver {
-  static const String DEFAULT_RTMP_URL = "rtmp://global-live.mux.com:5222/app";
-  static const String DEFAULT_RTMPS_URL = "rtmps://global-live.mux.com:443/app";
-  static const String SRT_URL = "srt://global-live.mux.com:6001";
-  static const String VIDEO_DIRECTORY = "Movies/flutter_test";
-  static const String PHOTO_DIRECTORY = "Pictures/flutter_test";
-
-  final TextEditingController _textFieldController =
-      TextEditingController(text: DEFAULT_RTMP_URL);
+class _StartStreamPageState extends State<StartStreamPage> {
   final TextEditingController _streamKeyController = TextEditingController();
 
-  CameraController? controller;
-  String? imagePath;
-  String? videoPath;
-  String? url;
-  VideoPlayerController? videoController;
-  VoidCallback? videoPlayerListener;
-  bool enableAudio = true;
-  bool useOpenGL = true;
+  static const String defaultRtmpUrl = "rtmp://global-live.mux.com:5222/app";
 
-  bool get isStreaming => controller?.value.isStreamingVideoRtmp ?? false;
-  bool isVisible = true;
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: AppColors.background,
+      appBar: AppBar(
+        backgroundColor: Colors.black,
+        title: const Text("Pantalla Inicial"),
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(24.0),
+        child: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                "Inicia tu stream",
+                style: TextStyle(
+                  color: AppColors.foreground,
+                  fontSize: 24,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 32),
+              TextField(
+                controller: _streamKeyController,
+                style: const TextStyle(color: AppColors.foreground),
+                decoration: InputDecoration(
+                  labelText: 'Stream Key',
+                  labelStyle: const TextStyle(color: AppColors.accent),
+                  hintText: 'Ej: 24ff56bf-8214-xxxx-xxxx-f0d518a72a96',
+                  hintStyle: TextStyle(
+                    color: AppColors.foreground.withOpacity(0.3),
+                  ),
+                  enabledBorder: const OutlineInputBorder(
+                    borderSide: BorderSide(color: AppColors.accent),
+                  ),
+                  focusedBorder: const OutlineInputBorder(
+                    borderSide: BorderSide(color: AppColors.accent, width: 2),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 24),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppColors.buttonColor,
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
+                ),
+                onPressed: () {
+                  final streamKey = _streamKeyController.text.trim();
+                  if (streamKey.isEmpty) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('La Stream Key no puede estar vacía'),
+                      ),
+                    );
+                    return;
+                  }
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => CameraExampleHome(
+                        baseUrl: defaultRtmpUrl,
+                        streamKey: streamKey,
+                      ),
+                    ),
+                  );
+                },
+                child: Text(
+                  "Ir a Cámara",
+                  style: TextStyle(color: AppColors.foreground),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//                    PANTALLA DE CÁMARA Y CONTROL DE STREAM
+// ─────────────────────────────────────────────────────────────────────────────
+class CameraExampleHome extends StatefulWidget {
+  final String baseUrl; // p. ej. "rtmp://global-live.mux.com:5222/app"
+  final String streamKey; // p. ej. "xxxxx-xxxx-xxxx"
+
+  const CameraExampleHome({
+    Key? key,
+    required this.baseUrl,
+    required this.streamKey,
+  }) : super(key: key);
+
+  @override
+  CameraExampleHomeState createState() => CameraExampleHomeState();
+}
+
+class CameraExampleHomeState extends State<CameraExampleHome> {
+  CameraController? controller;
+
+  // Cámara seleccionada (front o back).
+  CameraDescription? selectedCamera;
+
+  // Máxima resolución disponible
+  final ResolutionPreset _resolutionPreset = ResolutionPreset.max;
 
   bool get isControllerInitialized => controller?.value.isInitialized ?? false;
+  bool get isStreaming => controller?.value.isStreamingVideoRtmp ?? false;
 
-  bool get isStreamingVideoRtmp =>
-      controller?.value.isStreamingVideoRtmp ?? false;
-
-  bool get isRecordingVideo => controller?.value.isRecordingVideo ?? false;
-
-  bool get isRecordingPaused => controller?.value.isRecordingPaused ?? false;
-
-  bool get isStreamingPaused => controller?.value.isStreamingPaused ?? false;
-
-  bool get isTakingPicture => controller?.value.isTakingPicture ?? false;
+  // Timer para el tiempo de transmisión
+  Timer? _timer;
+  Duration _broadcastDuration = Duration.zero;
+  DateTime? _streamStartTime;
 
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this);
+    _initFirstCamera();
+  }
+
+  /// Inicializa la cámara por defecto (trasera).
+  Future<void> _initFirstCamera() async {
+    if (cameras.isEmpty) {
+      debugPrint("No hay cámaras disponibles");
+      return;
+    }
+
+    selectedCamera = cameras.firstWhere(
+      (desc) => desc.lensDirection == CameraLensDirection.back,
+      orElse: () => cameras.first,
+    );
+
+    await _initializeCamera(selectedCamera!);
+  }
+
+  /// Inicializa el controlador sin OpenGL (para evitar eglContext null).
+  /// Ahora, agregamos un pequeño `Future.delayed` cuando se cambia de cámara
+  /// y se estaba streameando, para dar tiempo a la librería a liberar la Surface.
+  Future<void> _initializeCamera(CameraDescription cameraDescription) async {
+    final wasStreaming = isStreaming;
+    if (wasStreaming) {
+      // Detenemos streaming si estaba activo
+      await _stopVideoStreaming();
+      // Pequeña espera para que la Surface se libere antes de recrearse
+      await Future.delayed(const Duration(milliseconds: 500));
+    }
+
+    // Liberar controlador previo
+    await controller?.dispose();
+
+    controller = CameraController(
+      cameraDescription,
+      _resolutionPreset,
+      androidUseOpenGL: false, // Evitar crash en la librería de Pedro
+    );
+
+    // Listener de errores
+    controller?.addListener(() {
+      if (controller != null && controller!.value.hasError) {
+        _showInSnackBar(
+          'Error en la cámara: ${controller!.value.errorDescription}',
+        );
+      }
+    });
+
+    try {
+      await controller?.initialize();
+      setState(() {});
+    } on CameraException catch (e) {
+      _showCameraException(e);
+      return;
+    }
+
+    // Reanudamos stream automáticamente si lo detenimos al cambiar de cámara
+    if (wasStreaming && isControllerInitialized) {
+      await _startVideoStreaming();
+    }
   }
 
   @override
   void dispose() {
-    // Liberar recursos
+    _timer?.cancel();
     controller?.dispose();
-    videoController?.dispose();
-    _textFieldController.dispose();
-    _streamKeyController.dispose();
-    WidgetsBinding.instance.removeObserver(this);
     Wakelock.disable();
     super.dispose();
   }
 
-  @override
-  Future<void> didChangeAppLifecycleState(AppLifecycleState state) async {
-    // App state changed before we got the chance to initialize.
-    if (controller == null || !isControllerInitialized) {
-      return;
-    }
-    if (state == AppLifecycleState.paused) {
-      isVisible = false;
-      if (isStreaming) {
-        await pauseVideoStreaming();
-      }
-    } else if (state == AppLifecycleState.resumed) {
-      isVisible = true;
-      if (controller != null) {
-        if (isStreaming) {
-          await resumeVideoStreaming();
-        } else {
-          onNewCameraSelected(controller!.description);
-        }
-      }
-    }
-  }
-
-  final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
-
+  // ───────────────────────────────────────────────────────────────────────────
+  //                                 UI
+  // ───────────────────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
-    Color color = Colors.grey;
-
-    if (controller != null) {
-      if (controller!.value.isRecordingVideo ?? false) {
-        color = Colors.redAccent;
-      } else if (controller!.value.isStreamingVideoRtmp ?? false) {
-        color = Colors.blueAccent;
-      }
-    }
+    final borderColor = isStreaming ? AppColors.accent : Colors.grey.shade700;
 
     return Scaffold(
-      key: _scaffoldKey,
+      backgroundColor: AppColors.background,
       appBar: AppBar(
-        title: const Text('Camera example'),
+        backgroundColor: Colors.black,
+        title: const Text("Cámara en vivo"),
+        centerTitle: true,
+        actions: [
+          IconButton(
+            onPressed: _onSwitchCamera,
+            icon: const Icon(Icons.cameraswitch),
+            tooltip: "Rotar cámara",
+          ),
+        ],
       ),
       body: Column(
-        children: <Widget>[
+        children: [
+          // Vista de la cámara
           Expanded(
             child: Container(
+              margin: const EdgeInsets.all(16),
               decoration: BoxDecoration(
-                color: Colors.black,
-                border: Border.all(
-                  color: color,
-                  width: 3.0,
-                ),
+                color: AppColors.background,
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: borderColor, width: 2.0),
               ),
-              child: Padding(
-                padding: const EdgeInsets.all(1.0),
-                child: Center(
-                  child: _cameraPreviewWidget(),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(14),
+                child: Stack(
+                  children: [
+                    _cameraPreviewWidget(),
+                    if (isStreaming)
+                      Positioned(
+                        top: 16,
+                        left: 16,
+                        right: 16,
+                        child: Row(
+                          children: [
+                            // Logo placeholder
+                            Container(
+                              width: 40,
+                              height: 40,
+                              decoration: const BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: AppColors.buttonColor,
+                              ),
+                              child: const Center(
+                                child: Icon(Icons.video_camera_front,
+                                    color: AppColors.foreground),
+                              ),
+                            ),
+                            const SizedBox(width: 16),
+                            // LIVE
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 8, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: AppColors.liveRed,
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: const Text(
+                                "LIVE",
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 16),
+                            // Tiempo
+                            Expanded(
+                              child: Text(
+                                _formattedDuration(_broadcastDuration),
+                                style: const TextStyle(
+                                  color: AppColors.foreground,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                  ],
                 ),
               ),
             ),
           ),
-          _captureControlRowWidget(),
-          _toggleAudioWidget(),
-          Padding(
-            padding: const EdgeInsets.all(5.0),
+
+          // Botones Start / Stop
+          Container(
+            padding: const EdgeInsets.symmetric(vertical: 16),
+            decoration: BoxDecoration(
+              color: AppColors.buttonColor,
+              borderRadius:
+                  const BorderRadius.vertical(top: Radius.circular(24)),
+            ),
             child: Row(
-              mainAxisAlignment: MainAxisAlignment.start,
-              children: <Widget>[
-                _cameraTogglesRowWidget(),
-                _thumbnailWidget(),
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: [
+                ElevatedButton.icon(
+                  onPressed: isControllerInitialized && !isStreaming
+                      ? _startVideoStreaming
+                      : null,
+                  icon: const Icon(Icons.play_arrow),
+                  label: const Text("Start"),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppColors.accent,
+                    foregroundColor: AppColors.background,
+                  ),
+                ),
+                ElevatedButton.icon(
+                  onPressed: isStreaming ? _stopVideoStreaming : null,
+                  icon: const Icon(Icons.stop),
+                  label: const Text("Stop"),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppColors.liveRed,
+                    foregroundColor: Colors.white,
+                  ),
+                ),
               ],
             ),
           ),
@@ -168,634 +354,174 @@ class CameraExampleHomeState extends State<CameraExampleHome>
     );
   }
 
-  /// Display the preview from the camera (or a message if the preview is not available).
   Widget _cameraPreviewWidget() {
-    if (controller == null || !isControllerInitialized) {
-      return const Text(
-        'Tap a camera',
-        style: TextStyle(
-          color: Colors.white,
-          fontSize: 24.0,
-          fontWeight: FontWeight.w900,
-        ),
+    if (!isControllerInitialized) {
+      return const Center(
+        child: CircularProgressIndicator(color: AppColors.foreground),
       );
     }
-
     return AspectRatio(
       aspectRatio: controller!.value.aspectRatio,
       child: CameraPreview(controller!),
     );
   }
 
-  /// Toggle recording audio
-  Widget _toggleAudioWidget() {
-    return Padding(
-      padding: const EdgeInsets.only(left: 25),
-      child: Row(
-        children: <Widget>[
-          const Text('Enable Audio:'),
-          Switch(
-            value: enableAudio,
-            onChanged: (bool value) {
-              enableAudio = value;
-              if (controller != null) {
-                onNewCameraSelected(controller!.description);
-              }
-            },
-          ),
-        ],
-      ),
-    );
-  }
+  // ───────────────────────────────────────────────────────────────────────────
+  //                STREAM: START / STOP (MANUAL)
+  // ───────────────────────────────────────────────────────────────────────────
+  String get _fullRtmpUrl => "${widget.baseUrl}/${widget.streamKey}";
 
-  /// Display the thumbnail of the captured image or video.
-  Widget _thumbnailWidget() {
-    return Expanded(
-      child: Align(
-        alignment: Alignment.centerRight,
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            videoController == null && imagePath == null
-                ? Container()
-                : SizedBox(
-                    width: 64.0,
-                    height: 64.0,
-                    child: (videoController == null)
-                        ? Image.file(File(imagePath!))
-                        : Container(
-                            decoration: BoxDecoration(
-                                border: Border.all(color: Colors.pink)),
-                            child: Center(
-                              child: AspectRatio(
-                                  aspectRatio:
-                                      videoController!.value.aspectRatio,
-                                  child: VideoPlayer(videoController!)),
-                            ),
-                          ),
-                  ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  /// Display the control bar with buttons to take pictures and record videos.
-  Widget _captureControlRowWidget() {
-    if (controller == null) return Container();
-
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-      mainAxisSize: MainAxisSize.max,
-      children: <Widget>[
-        IconButton(
-          icon: const Icon(Icons.camera_alt),
-          color: Colors.blue,
-          onPressed: controller != null && isControllerInitialized
-              ? onTakePictureButtonPressed
-              : null,
-        ),
-        IconButton(
-          icon: const Icon(Icons.videocam),
-          color: Colors.blue,
-          onPressed:
-              controller != null && isControllerInitialized && !isRecordingVideo
-                  ? onVideoRecordButtonPressed
-                  : null,
-        ),
-        IconButton(
-          icon: const Icon(Icons.watch),
-          color: Colors.blue,
-          onPressed: controller != null &&
-                  isControllerInitialized &&
-                  !isStreamingVideoRtmp
-              ? onVideoStreamingButtonPressed
-              : null,
-        ),
-        IconButton(
-          icon: controller != null && (isRecordingPaused || isStreamingPaused)
-              ? const Icon(Icons.play_arrow)
-              : const Icon(Icons.pause),
-          color: Colors.blue,
-          onPressed: controller != null &&
-                  isControllerInitialized &&
-                  (isRecordingVideo || isStreamingVideoRtmp)
-              ? (controller != null && (isRecordingPaused || isStreamingPaused)
-                  ? onResumeButtonPressed
-                  : onPauseButtonPressed)
-              : null,
-        ),
-        IconButton(
-          icon: const Icon(Icons.stop),
-          color: Colors.red,
-          onPressed: controller != null &&
-                  isControllerInitialized &&
-                  (isRecordingVideo || isStreamingVideoRtmp)
-              ? onStopButtonPressed
-              : null,
-        )
-      ],
-    );
-  }
-
-  /// Display a row of toggle to select the camera (or a message if no camera is available).
-  Widget _cameraTogglesRowWidget() {
-    final List<Widget> toggles = <Widget>[];
-
-    if (cameras.isEmpty) {
-      return const Text('No camera found');
-    } else {
-      for (CameraDescription cameraDescription in cameras) {
-        toggles.add(
-          SizedBox(
-            width: 90.0,
-            child: RadioListTile<CameraDescription>(
-              title: Icon(getCameraLensIcon(cameraDescription.lensDirection)),
-              groupValue: controller?.description,
-              value: cameraDescription,
-              onChanged: (CameraDescription? cld) =>
-                  isRecordingVideo ? null : onNewCameraSelected(cld),
-            ),
-          ),
-        );
-      }
+  Future<void> _startVideoStreaming() async {
+    if (!isControllerInitialized) {
+      _showInSnackBar('Error: cámara no lista.');
+      return;
     }
-
-    return Row(children: toggles);
-  }
-
-  String timestamp() => DateTime.now().millisecondsSinceEpoch.toString();
-
-  void showInSnackBar(String message) {
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text(message)));
-  }
-
-  void onNewCameraSelected(CameraDescription? cameraDescription) async {
-    if (cameraDescription == null) return;
-
-    if (controller != null) {
-      await stopVideoStreaming();
-      await controller?.dispose();
-    }
-    controller = CameraController(
-      cameraDescription,
-      ResolutionPreset.medium,
-      enableAudio: enableAudio,
-      androidUseOpenGL: useOpenGL,
-    );
-
-    // If the controller is updated then update the UI.
-    controller!.addListener(() async {
-      if (mounted) setState(() {});
-
-      if (controller != null) {
-        if (controller!.value.hasError) {
-          showInSnackBar('Camera error ${controller!.value.errorDescription}');
-          await stopVideoStreaming();
-        } else {
-          try {
-            final Map<dynamic, dynamic> event =
-                controller!.value.event as Map<dynamic, dynamic>;
-            debugPrint('Event $event');
-            final String eventType = event['eventType'] as String;
-            if (isVisible && isStreaming && eventType == 'rtmp_retry') {
-              showInSnackBar('BadName received, endpoint in use.');
-              await stopVideoStreaming();
-            }
-          } catch (e) {
-            debugPrint(e.toString());
-          }
-        }
-      }
-    });
+    if (isStreaming) return;
 
     try {
-      await controller!.initialize();
-    } on CameraException catch (e) {
-      _showCameraException(e);
-    }
-
-    if (mounted) {
+      await controller!.startVideoStreaming(_fullRtmpUrl);
+      _showInSnackBar('¡Stream iniciado correctamente!');
+      Wakelock.enable();
+      _broadcastDuration = Duration.zero;
+      _streamStartTime = DateTime.now();
+      _timer?.cancel();
+      _timer = Timer.periodic(const Duration(seconds: 1), _updateTimer);
       setState(() {});
-    }
-  }
-
-  void onTakePictureButtonPressed() {
-    takePicture().then((String? filePath) {
-      if (mounted) {
-        setState(() {
-          imagePath = filePath;
-          videoController?.dispose();
-          videoController = null;
-        });
-        showInSnackBar('Picture saved to $filePath');
-      }
-    });
-  }
-
-  void onVideoRecordButtonPressed() {
-    startVideoRecording().then((String? filePath) {
-      if (mounted) setState(() {});
-      showInSnackBar('Saving video to $filePath');
-      Wakelock.enable();
-    });
-  }
-
-  void onVideoStreamingButtonPressed() {
-    startVideoStreaming().then((String? url) {
-      if (mounted) setState(() {});
-      showInSnackBar('Streaming video to $url');
-      Wakelock.enable();
-    });
-  }
-
-  void onRecordingAndVideoStreamingButtonPressed() {
-    startRecordingAndVideoStreaming().then((String? url) {
-      if (mounted) setState(() {});
-      showInSnackBar('Recording streaming video to $url');
-      Wakelock.enable();
-    });
-  }
-
-  void onStopButtonPressed() {
-    if (isStreamingVideoRtmp) {
-      stopVideoStreaming().then((_) {
-        if (mounted) setState(() {});
-        showInSnackBar('Video streamed to: $url');
-      });
-    } else {
-      stopVideoRecording().then((_) {
-        if (mounted) setState(() {});
-        showInSnackBar('Video recorded to: $videoPath');
-      });
-    }
-    Wakelock.disable();
-  }
-
-  void onPauseButtonPressed() {
-    pauseVideoRecording().then((_) {
-      if (mounted) setState(() {});
-      showInSnackBar('Video recording paused');
-    });
-  }
-
-  void onResumeButtonPressed() {
-    resumeVideoRecording().then((_) {
-      if (mounted) setState(() {});
-      showInSnackBar('Video recording resumed');
-    });
-  }
-
-  void onStopStreamingButtonPressed() {
-    stopVideoStreaming().then((_) {
-      if (mounted) setState(() {});
-      showInSnackBar('Video not streaming to: $url');
-    });
-  }
-
-  void onPauseStreamingButtonPressed() {
-    pauseVideoStreaming().then((_) {
-      if (mounted) setState(() {});
-      showInSnackBar('Video streaming paused');
-    });
-  }
-
-  void onResumeStreamingButtonPressed() {
-    resumeVideoStreaming().then((_) {
-      if (mounted) setState(() {});
-      showInSnackBar('Video streaming resumed');
-    });
-  }
-
-  Future<String?> startVideoRecording() async {
-    if (!isControllerInitialized) {
-      showInSnackBar('Error: select a camera first.');
-      return null;
-    }
-
-    final Directory? extDir = await getExternalStorageDirectory();
-    if (extDir == null) return null;
-
-    final String dirPath = '${extDir.path}/Movies/flutter_test';
-    await Directory(dirPath).create(recursive: true);
-    final String filePath = '$dirPath/${timestamp()}.mp4';
-
-    if (isRecordingVideo) {
-      // A recording is already started, do nothing.
-      return null;
-    }
-
-    try {
-      videoPath = filePath;
-      await controller!.startVideoRecording(filePath);
     } on CameraException catch (e) {
-      _showCameraException(e);
-      return null;
-    }
-    return filePath;
-  }
-
-  Future<void> stopVideoRecording() async {
-    if (!isRecordingVideo) {
-      return;
-    }
-
-    try {
-      await controller!.stopVideoRecording();
-    } on CameraException catch (e) {
-      _showCameraException(e);
-      return;
-    }
-
-    await _startVideoPlayer();
-  }
-
-  Future<void> pauseVideoRecording() async {
-    try {
-      if (controller!.value.isRecordingVideo!) {
-        await controller!.pauseVideoRecording();
+      if (e.description?.contains('BadName') ?? false) {
+        _showInSnackBar('Error: Endpoint en uso. Prueba otra Stream Key.');
+      } else {
+        _showCameraException(e);
       }
-      if (controller!.value.isStreamingVideoRtmp!) {
-        await controller!.pauseVideoStreaming();
-      }
-    } on CameraException catch (e) {
-      _showCameraException(e);
-      rethrow;
     } catch (e) {
-      debugPrint(e.toString());
+      _showInSnackBar('Error al iniciar streaming: $e');
     }
   }
 
-  Future<void> resumeVideoRecording() async {
-    try {
-      if (controller!.value.isRecordingVideo!) {
-        await controller!.resumeVideoRecording();
-      }
-      if (controller!.value.isStreamingVideoRtmp!) {
-        await controller!.resumeVideoStreaming();
-      }
-    } on CameraException catch (e) {
-      _showCameraException(e);
-      rethrow;
-    } catch (e) {
-      debugPrint(e.toString());
-    }
-  }
-
-  Future<String> _getUrl() async {
-    String result = _textFieldController.text;
-
-    return await showDialog(
-            context: context,
-            builder: (context) {
-              return AlertDialog(
-                title: const Text('Streaming Configuration'),
-                content: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    DropdownButtonFormField<String>(
-                      value: result,
-                      decoration: const InputDecoration(
-                        labelText: 'RTMP URL',
-                      ),
-                      items: const [
-                        DropdownMenuItem(
-                          value: DEFAULT_RTMP_URL,
-                          child: Text('RTMP ($DEFAULT_RTMP_URL)'),
-                        ),
-                        DropdownMenuItem(
-                          value: DEFAULT_RTMPS_URL,
-                          child: Text('RTMPS (more secure)'),
-                        ),
-                      ],
-                      onChanged: (value) => result = value!,
-                    ),
-                    TextField(
-                      controller: _streamKeyController,
-                      decoration: const InputDecoration(
-                        labelText: 'Stream Key',
-                        hintText: 'Enter your Mux Stream Key',
-                      ),
-                    ),
-                  ],
-                ),
-                actions: <Widget>[
-                  TextButton(
-                    child: Text(
-                        MaterialLocalizations.of(context).cancelButtonLabel),
-                    onPressed: () => Navigator.of(context).pop(result),
-                  ),
-                  TextButton(
-                    child:
-                        Text(MaterialLocalizations.of(context).okButtonLabel),
-                    onPressed: () {
-                      // Combinar URL y Stream Key
-                      final completeUrl =
-                          '$result/${_streamKeyController.text}';
-                      Navigator.pop(context, completeUrl);
-                    },
-                  )
-                ],
-              );
-            }) ??
-        result;
-  }
-
-  Future<String?> startRecordingAndVideoStreaming() async {
-    if (!isControllerInitialized) {
-      showInSnackBar('Error: select a camera first.');
-      return null;
-    }
-
-    if (controller!.value.isStreamingVideoRtmp == true ||
-        controller!.value.isStreamingVideoRtmp == true) {
-      return null;
-    }
-
-    String myUrl = await _getUrl();
-
-    final Directory extDir = await getApplicationDocumentsDirectory();
-    final String dirPath = '${extDir.path}/Movies/flutter_test';
-    await Directory(dirPath).create(recursive: true);
-    final String filePath = '$dirPath/${timestamp()}.mp4';
-
-    try {
-      url = myUrl;
-      videoPath = filePath;
-      await controller!.startVideoRecordingAndStreaming(videoPath!, url!);
-    } on CameraException catch (e) {
-      _showCameraException(e);
-      return null;
-    }
-    return url;
-  }
-
-  Future<String?> startVideoStreaming() async {
-    await stopVideoStreaming();
-    if (controller == null || !isControllerInitialized) {
-      showInSnackBar('Error: select a camera first.');
-      return null;
-    }
-
-    if (isStreamingVideoRtmp) {
-      return null;
-    }
-
-    try {
-      String myUrl = await _getUrl();
-
-      // Validar formato URL RTMP/RTMPS
-      if (!myUrl.startsWith('rtmp://') && !myUrl.startsWith('rtmps://')) {
-        showInSnackBar('Error: Invalid streaming URL format');
-        return null;
-      }
-
-      // Validar Stream Key
-      if (!myUrl.contains(_streamKeyController.text) ||
-          _streamKeyController.text.isEmpty) {
-        showInSnackBar('Error: Stream Key is required');
-        return null;
-      }
-
-      url = myUrl;
-      await controller!.startVideoStreaming(url!);
-
-      // Mostrar información útil
-      showInSnackBar(
-          'Streaming started to Mux\nStream Key: ${_streamKeyController.text}');
-    } on CameraException catch (e) {
-      _showCameraException(e);
-      return null;
-    }
-    return url;
-  }
-
-  Future<void> stopVideoStreaming() async {
-    if (controller == null || !isControllerInitialized) {
-      return;
-    }
-    if (!isStreamingVideoRtmp) {
-      return;
-    }
+  Future<void> _stopVideoStreaming() async {
+    if (!isStreaming) return;
 
     try {
       await controller!.stopVideoStreaming();
+      _showInSnackBar('Streaming detenido.');
+      Wakelock.disable();
+      _timer?.cancel();
+      _broadcastDuration = Duration.zero;
+      setState(() {});
     } on CameraException catch (e) {
       _showCameraException(e);
-      return;
     }
   }
 
-  Future<void> pauseVideoStreaming() async {
-    if (!isStreamingVideoRtmp) {
-      return;
-    }
-
-    try {
-      await controller!.pauseVideoStreaming();
-    } on CameraException catch (e) {
-      _showCameraException(e);
-      rethrow;
-    }
-  }
-
-  Future<void> resumeVideoStreaming() async {
-    if (!isStreamingVideoRtmp) {
+  // ───────────────────────────────────────────────────────────────────────────
+  //                         ROTAR CÁMARA
+  // ───────────────────────────────────────────────────────────────────────────
+  Future<void> _onSwitchCamera() async {
+    if (cameras.length < 2) {
+      _showInSnackBar('No hay múltiples cámaras disponibles.');
       return;
     }
 
-    try {
-      await controller!.resumeVideoStreaming();
-    } on CameraException catch (e) {
-      _showCameraException(e);
-      rethrow;
+    final currentIndex = cameras.indexOf(selectedCamera!);
+    final nextIndex = (currentIndex + 1) % cameras.length;
+    final nextCamera = cameras[nextIndex];
+    selectedCamera = nextCamera;
+
+    await _initializeCamera(nextCamera);
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  //                               TIMER
+  // ───────────────────────────────────────────────────────────────────────────
+  void _updateTimer(Timer timer) {
+    if (!isStreaming || _streamStartTime == null) {
+      timer.cancel();
+      return;
+    }
+    final diff = DateTime.now().difference(_streamStartTime!);
+    setState(() => _broadcastDuration = diff);
+  }
+
+  String _formattedDuration(Duration duration) {
+    final hours = duration.inHours;
+    final minutes = duration.inMinutes % 60;
+    final seconds = duration.inSeconds % 60;
+    if (hours > 0) {
+      return '${_twoDigits(hours)}:${_twoDigits(minutes)}:${_twoDigits(seconds)}';
+    } else {
+      return '${_twoDigits(minutes)}:${_twoDigits(seconds)}';
     }
   }
 
-  Future<void> _startVideoPlayer() async {
-    final VideoPlayerController vcontroller =
-        VideoPlayerController.file(File(videoPath!));
-    videoPlayerListener = () {
-      if (videoController != null) {
-        // Refreshing the state to update video player with the correct ratio.
-        if (mounted) setState(() {});
-        videoController!.removeListener(videoPlayerListener ?? () {});
-      }
-    };
-    vcontroller.addListener(videoPlayerListener ?? () {});
-    await vcontroller.setLooping(true);
-    await vcontroller.initialize();
-    await videoController?.dispose();
-    if (mounted) {
-      setState(() {
-        imagePath = null;
-        videoController = vcontroller;
-      });
-    }
-    await vcontroller.play();
-  }
+  String _twoDigits(int n) => n >= 10 ? '$n' : '0$n';
 
-  Future<String?> takePicture() async {
-    if (!isControllerInitialized) {
-      showInSnackBar('Error: select a camera first.');
-      return null;
-    }
-    final Directory? extDir = await getExternalStorageDirectory();
-    final String dirPath = '${extDir?.path}/Pictures/flutter_test';
-    await Directory(dirPath).create(recursive: true);
-    final String filePath = '$dirPath/${timestamp()}.jpg';
-
-    if (isTakingPicture) {
-      // A capture is already pending, do nothing.
-      return null;
-    }
-
-    try {
-      await controller!.takePicture(filePath);
-    } on CameraException catch (e) {
-      _showCameraException(e);
-      return null;
-    }
-    return filePath;
+  // ───────────────────────────────────────────────────────────────────────────
+  //                                UTILS
+  // ───────────────────────────────────────────────────────────────────────────
+  void _showInSnackBar(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
+    );
   }
 
   void _showCameraException(CameraException e) {
-    logError(e.code, e.description ?? "No description found");
-    showInSnackBar(
-        'Error: ${e.code}\n${e.description ?? "No description found"}');
+    debugPrint('Camera error: ${e.code}\n${e.description}');
+    _showInSnackBar('Error: ${e.code}\n${e.description}');
   }
 }
 
-class CameraApp extends StatelessWidget {
-  const CameraApp({super.key});
+// ─────────────────────────────────────────────────────────────────────────────
+//                                  MAIN
+// ─────────────────────────────────────────────────────────────────────────────
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  // Pedir permisos de cámara
+  if (Platform.isAndroid || Platform.isIOS) {
+    final status = await Permission.camera.request();
+    if (status.isDenied) {
+      throw CameraException(
+        'PERMISSION_DENIED',
+        'Se requiere el permiso de cámara para usar esta app.',
+      );
+    }
+  }
+
+  // Obtener cámaras
+  try {
+    cameras = await availableCameras();
+  } on CameraException catch (e) {
+    debugPrint("Error al obtener cámaras: ${e.description}");
+  }
+
+  runApp(const MyApp());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//                                 MyApp
+// ─────────────────────────────────────────────────────────────────────────────
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return const MaterialApp(
-      home: CameraExampleHome(),
+    return MaterialApp(
+      title: 'High Quality Stream',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        scaffoldBackgroundColor: AppColors.background,
+        primaryColor: AppColors.accent,
+        appBarTheme: const AppBarTheme(
+          backgroundColor: Colors.black,
+          foregroundColor: AppColors.foreground,
+        ),
+        elevatedButtonTheme: ElevatedButtonThemeData(
+          style: ElevatedButton.styleFrom(
+            foregroundColor: AppColors.foreground,
+          ),
+        ),
+      ),
+      home: const StartStreamPage(),
     );
   }
-}
-
-List<CameraDescription> cameras = [];
-
-Future<void> main() async {
-  try {
-    WidgetsFlutterBinding.ensureInitialized();
-
-    // Verificar permisos de cámara
-    if (Platform.isAndroid || Platform.isIOS) {
-      final status = await Permission.camera.request();
-      if (status.isDenied) {
-        throw CameraException('PERMISSION_DENIED',
-            'Camera permission is required to use this app.');
-      }
-    }
-
-    cameras = await availableCameras();
-  } on CameraException catch (e) {
-    logError(e.code, e.description ?? "No description found");
-  }
-  runApp(const CameraApp());
 }
