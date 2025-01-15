@@ -28,6 +28,8 @@ allprojects {
                         namespace project.group
                     }
                     
+                    compileSdkVersion 34
+                    
                     compileOptions {
                         sourceCompatibility rootProject.ext.java_version
                         targetCompatibility rootProject.ext.java_version
