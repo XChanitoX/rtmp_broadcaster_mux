@@ -1,4 +1,4 @@
-package com.example.rtmp_broadcaster_mux
+package com.wuocompany.streaming
 
 import io.flutter.embedding.android.FlutterActivity
 
